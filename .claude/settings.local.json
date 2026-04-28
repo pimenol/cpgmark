@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x compile.sh cpg.sh)",
+      "Bash(bash compile.sh)",
+      "Bash(bash cpg.sh)",
+      "Bash(awk '$1 != $2 {print \"line \" NR \": predicted=\" $1 \", truth=\" $2}')"
+    ]
+  }
+}
