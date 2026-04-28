@@ -1,0 +1,8 @@
+# if you do not use the lab Ubuntu machines, you should write a list of packages that
+# should be installed so that your project compiles, such as, gcc; in the example we
+# used java as follows
+
+apt-get install python
+
+# python libraries, for example
+numpy 
