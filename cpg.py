@@ -1,49 +1,4 @@
 #!/usr/bin/env python3
-"""
-CpG-Island Recognition via first-order Markov models + Naive Bayes.
-
-Course:  BIN — Bioinformatics, FEL CTU
-Author:  Pimenov L. (pimenol1@cvut.cz)
-
-==============================================================================
-Math (exactly as specified by the assignment)
-==============================================================================
-
-Alphabet:        Σ = {A, C, G, T, end}        |Σ| = 5
-Pseudocount:     +1 per cell, denominator pad = +5  (Laplace smoothing)
-
-Per-class priors over the first symbol:
-    P_y(a) = (count_y(a) + 1) / (N_y + 5)
-    where N_y is the number of training sequences in class y
-    (the count over first-symbol positions sums to N_y).
-
-Per-class transitions (b follows a, OR a is the last symbol → b = "end"):
-    P_y(b | a) = (count_y(a, b) + 1) / (count_y(a, ·) + 5)
-    where count_y(a, ·) = Σ_{b ∈ Σ} count_y(a, b)
-    so the same denominator is used for the four nucleotide successors
-    AND the "end" pseudo-successor → P_y(·|a) sums to 1 across Σ.
-
-Sequence likelihood under class y:
-    P(x | y) = P_y(x_1) · Π_{i=1..L-1} P_y(x_{i+1} | x_i) · P_y(end | x_L)
-
-Class priors P(y) come from training-file line counts:
-    P(y) = N_y / (N_cpg + N_null)
-
-Decision rule (predict label 1 ↔ CpG):
-    ŷ = 1   iff   log P(CpG) + log P(x|CpG)  >  log P(null) + log P(x|null)
-
-==============================================================================
-Numerics
-==============================================================================
-Sequences are long, so we work in log-space throughout: every count is turned
-into a log-probability once during training, and scoring is a sum.
-
-==============================================================================
-Complexity
-==============================================================================
-Training:  O(total chars in train files)        memory: O(|Σ|^2) = O(25)
-Scoring:   O(L) per sequence, O(total test chars) overall.
-"""
 
 from __future__ import annotations
 
@@ -52,14 +7,15 @@ import sys
 from dataclasses import dataclass
 from typing import Iterable
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 NUCLEOTIDES: tuple[str, ...] = ("A", "C", "G", "T")
 END: str = "end"
-STATES: tuple[str, ...] = (*NUCLEOTIDES, END)   # |Σ| = 5
-PSEUDO_DENOM: int = len(STATES)                 # = 5
+STATES: tuple[str, ...] = (*NUCLEOTIDES, END)
+ALPHABET_SIZE: int = len(STATES)
+PSEUDOCOUNT: int = 1
+SMOOTHING_DENOM: int = PSEUDOCOUNT * ALPHABET_SIZE
+
+LABEL_CPG: int = 1
+LABEL_NULL: int = 0
 
 CPG_TRAIN: str = "cpg_train.txt"
 NULL_TRAIN: str = "null_train.txt"
@@ -69,41 +25,16 @@ PREDICTIONS_OUT: str = "predictions.txt"
 ACCURACY_OUT: str = "accuracy.txt"
 
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class MarkovModel:
-    """A trained first-order Markov model over Σ = {A, C, G, T, end}.
-
-    All values are stored already in **log space** to avoid underflow.
-    """
-
-    log_start: dict[str, float]               # log P(x_1 = a)
-    log_trans: dict[str, dict[str, float]]    # log P(b | a),  b ∈ {A,C,G,T}
-    log_end: dict[str, float]                 # log P(end | a)
-
-
-# ---------------------------------------------------------------------------
-# I/O
-# ---------------------------------------------------------------------------
+    log_start: dict[str, float]
+    log_trans: dict[str, dict[str, float]]
+    log_end: dict[str, float]
 
 
 def read_sequences(path: str) -> list[str]:
-    """Read non-empty stripped lines from *path*.
-
-    Tolerates trailing whitespace / blank lines so a stray newline at EOF
-    does not produce a phantom empty sequence.
-    """
     with open(path, "r", encoding="utf-8") as fh:
         return [line.strip() for line in fh if line.strip()]
-
-
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
 
 
 def _empty_counts() -> tuple[dict[str, int], dict[str, dict[str, int]], dict[str, int]]:
@@ -116,13 +47,6 @@ def _empty_counts() -> tuple[dict[str, int], dict[str, dict[str, int]], dict[str
 
 
 def train_markov(sequences: Iterable[str]) -> MarkovModel:
-    """Fit a first-order Markov model with Laplace smoothing.
-
-    The denominator for every transition row is ``count(a, ·) + 5`` so that
-    the four nucleotide successors and the ``end`` pseudo-successor share
-    one normalisation — they together sum to 1 in probability space.
-    The first-symbol distribution uses ``N_seqs + 5``.
-    """
     start_count, trans_count, end_count = _empty_counts()
     n_seqs: int = 0
 
@@ -135,31 +59,25 @@ def train_markov(sequences: Iterable[str]) -> MarkovModel:
             trans_count[seq[i]][seq[i + 1]] += 1
         end_count[seq[-1]] += 1
 
-    start_denom: float = n_seqs + PSEUDO_DENOM
+    start_denom: float = n_seqs + SMOOTHING_DENOM
     log_start: dict[str, float] = {
-        a: math.log((start_count[a] + 1) / start_denom) for a in NUCLEOTIDES
+        a: math.log((start_count[a] + PSEUDOCOUNT) / start_denom) for a in NUCLEOTIDES
     }
 
     log_trans: dict[str, dict[str, float]] = {}
     log_end: dict[str, float] = {}
     for a in NUCLEOTIDES:
         row_sum: int = sum(trans_count[a].values())
-        denom: float = row_sum + PSEUDO_DENOM
+        denom: float = row_sum + SMOOTHING_DENOM
         log_trans[a] = {
-            b: math.log((trans_count[a][b] + 1) / denom) for b in NUCLEOTIDES
+            b: math.log((trans_count[a][b] + PSEUDOCOUNT) / denom) for b in NUCLEOTIDES
         }
-        log_end[a] = math.log((end_count[a] + 1) / denom)
+        log_end[a] = math.log((end_count[a] + PSEUDOCOUNT) / denom)
 
     return MarkovModel(log_start=log_start, log_trans=log_trans, log_end=log_end)
 
 
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-
 def log_likelihood(seq: str, model: MarkovModel) -> float:
-    """Return log P(seq | model). Assumes ``seq`` is non-empty and clean."""
     log_p: float = model.log_start[seq[0]]
     for i in range(len(seq) - 1):
         log_p += model.log_trans[seq[i]][seq[i + 1]]
@@ -174,15 +92,9 @@ def classify(
     log_prior_cpg: float,
     log_prior_null: float,
 ) -> int:
-    """Return 1 if CpG is more probable than null, else 0."""
     score_cpg: float = log_prior_cpg + log_likelihood(seq, cpg)
     score_null: float = log_prior_null + log_likelihood(seq, null)
-    return 1 if score_cpg > score_null else 0
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
+    return LABEL_CPG if score_cpg > score_null else LABEL_NULL
 
 
 @dataclass(frozen=True)
@@ -195,11 +107,6 @@ class Metrics:
 
 
 def compute_metrics(predictions: list[int], truth: list[int]) -> Metrics:
-    """Standard binary-classification metrics with CpG (=1) as positive class.
-
-    Division-by-zero in precision/recall is guarded by returning 0.0, which
-    is the conventional safe fallback when the corresponding count is empty.
-    """
     if len(predictions) != len(truth):
         raise ValueError(
             f"length mismatch: {len(predictions)} predictions vs {len(truth)} labels"
@@ -207,13 +114,13 @@ def compute_metrics(predictions: list[int], truth: list[int]) -> Metrics:
 
     tp = fp = tn = fn = 0
     for p, t in zip(predictions, truth):
-        if p == 1 and t == 1:
+        if p == LABEL_CPG and t == LABEL_CPG:
             tp += 1
-        elif p == 1 and t == 0:
+        elif p == LABEL_CPG and t == LABEL_NULL:
             fp += 1
-        elif p == 0 and t == 0:
+        elif p == LABEL_NULL and t == LABEL_NULL:
             tn += 1
-        else:  # p == 0 and t == 1
+        else:
             fn += 1
 
     total: int = tp + fp + tn + fn
@@ -230,11 +137,6 @@ def compute_metrics(predictions: list[int], truth: list[int]) -> Metrics:
         precision=precision,
         recall=recall,
     )
-
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
 
 
 def write_predictions(path: str, predictions: list[int]) -> None:
@@ -254,11 +156,6 @@ def write_accuracy(path: str, m: Metrics) -> None:
         fh.write("\n".join(lines) + "\n")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     cpg_train = read_sequences(CPG_TRAIN)
     null_train = read_sequences(NULL_TRAIN)
@@ -271,8 +168,6 @@ def main() -> None:
     n_cpg: int = len(cpg_train)
     n_null: int = len(null_train)
     total_train: int = n_cpg + n_null
-    # Guarded just in case an empty training file slips through; in practice
-    # both files are non-empty so this is mostly defensive.
     log_prior_cpg: float = math.log(n_cpg / total_train) if n_cpg else -math.inf
     log_prior_null: float = math.log(n_null / total_train) if n_null else -math.inf
 
